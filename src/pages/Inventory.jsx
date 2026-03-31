@@ -1,60 +1,113 @@
-import { useState } from 'react';
-import { inventoryItems as initialItems } from '../data/mockData';
-import SortableTable from '../components/SortableTable';
-import SearchBar from '../components/SearchBar';
-import Modal from '../components/Modal';
-import ConfirmDialog from '../components/ConfirmDialog';
+import { useState, useEffect } from 'react'
+import { supabase } from '../lib/supabase'
+import SortableTable from '../components/SortableTable'
+import SearchBar from '../components/SearchBar'
+import Modal from '../components/Modal'
+import ConfirmDialog from '../components/ConfirmDialog'
 
-const emptyItem = { title: '', category: 'Book', description: '', era: '', region: '', format: '', condition: 'Good', quantity: 1 };
+const emptyForm = { title: '', category_id: '', description: '', era: '', region: '', format: '', condition_id: '', quantity_on_hand: 1 }
 
 export default function Inventory() {
-  const [items, setItems] = useState(initialItems);
-  const [search, setSearch] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState('');
-  const [conditionFilter, setConditionFilter] = useState('');
-  const [showModal, setShowModal] = useState(false);
-  const [editItem, setEditItem] = useState(null);
-  const [form, setForm] = useState(emptyItem);
-  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [items, setItems] = useState([])
+  const [categories, setCategories] = useState([])
+  const [conditions, setConditions] = useState([])
+  const [search, setSearch] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('')
+  const [conditionFilter, setConditionFilter] = useState('')
+  const [showModal, setShowModal] = useState(false)
+  const [editItem, setEditItem] = useState(null)
+  const [form, setForm] = useState(emptyForm)
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [loading, setLoading] = useState(true)
 
-  const filtered = items.filter(item => {
-    if (categoryFilter && item.category !== categoryFilter) return false;
-    if (conditionFilter && item.condition !== conditionFilter) return false;
+  // pulls items with their category and condition names from supabase
+  const fetchItems = async () => {
+    const { data } = await supabase
+      .from('reading_item')
+      .select('*, reading_category(category_name), reading_condition(condition_name)')
+      .order('item_id')
+    setItems(data || [])
+    setLoading(false)
+  }
+
+  // pulls the lookup tables so we can fill the dropdowns in the form
+  const fetchLookups = async () => {
+    const { data: cats } = await supabase.from('reading_category').select('*').order('category_id')
+    const { data: conds } = await supabase.from('reading_condition').select('*').order('condition_id')
+    setCategories(cats || [])
+    setConditions(conds || [])
+  }
+
+  useEffect(() => { fetchItems(); fetchLookups() }, [])
+
+  // flatten the joined data so sortable table can sort by these columns
+  const tableData = items.map(item => ({
+    ...item,
+    id: item.item_id,
+    categoryName: item.reading_category?.category_name || '',
+    conditionName: item.reading_condition?.condition_name || '',
+  }))
+
+  const filtered = tableData.filter(item => {
+    if (categoryFilter && item.category_id !== parseInt(categoryFilter)) return false
+    if (conditionFilter && item.condition_id !== parseInt(conditionFilter)) return false
     if (search) {
-      const s = search.toLowerCase();
-      if (!item.title.toLowerCase().includes(s) && !item.description.toLowerCase().includes(s)) return false;
+      const s = search.toLowerCase()
+      if (!item.title.toLowerCase().includes(s) && !(item.description || '').toLowerCase().includes(s)) return false
     }
-    return true;
-  });
+    return true
+  })
 
   const openAdd = () => {
-    setEditItem(null);
-    setForm(emptyItem);
-    setShowModal(true);
-  };
+    setEditItem(null)
+    setForm({ ...emptyForm })
+    setShowModal(true)
+  }
 
   const openEdit = (item) => {
-    setEditItem(item);
-    setForm({ title: item.title, category: item.category, description: item.description, era: item.era, region: item.region, format: item.format, condition: item.condition, quantity: item.quantity });
-    setShowModal(true);
-  };
+    setEditItem(item)
+    setForm({
+      title: item.title,
+      category_id: item.category_id || '',
+      description: item.description || '',
+      era: item.era || '',
+      region: item.region || '',
+      format: item.format || '',
+      condition_id: item.condition_id || '',
+      quantity_on_hand: item.quantity_on_hand,
+    })
+    setShowModal(true)
+  }
 
-  const handleSave = () => {
-    if (editItem) {
-      setItems(items.map(i => i.id === editItem.id ? { ...i, ...form } : i));
-    } else {
-      const newId = Math.max(...items.map(i => i.id), 0) + 1;
-      setItems([...items, { ...form, id: newId, price: 0, dateAcquired: new Date().toISOString().split('T')[0] }]);
+  const handleSave = async () => {
+    const payload = {
+      title: form.title,
+      category_id: parseInt(form.category_id) || null,
+      description: form.description,
+      era: form.era,
+      region: form.region,
+      format: form.format,
+      condition_id: parseInt(form.condition_id) || null,
+      quantity_on_hand: parseInt(form.quantity_on_hand) || 0,
     }
-    setShowModal(false);
-  };
+    if (editItem) {
+      await supabase.from('reading_item').update(payload).eq('item_id', editItem.item_id)
+    } else {
+      await supabase.from('reading_item').insert(payload)
+    }
+    setShowModal(false)
+    fetchItems()
+  }
 
-  const handleDelete = () => {
-    setItems(items.filter(i => i.id !== deleteTarget.id));
-    setDeleteTarget(null);
-  };
+  const handleDelete = async () => {
+    await supabase.from('reading_item').delete().eq('item_id', deleteTarget.item_id)
+    setDeleteTarget(null)
+    fetchItems()
+  }
 
-  const updateForm = (field, value) => setForm({ ...form, [field]: value });
+  const updateForm = (field, value) => setForm({ ...form, [field]: value })
+
+  if (loading) return <div className="page"><h1>Inventory</h1><p>Loading...</p></div>
 
   return (
     <div className="page">
@@ -64,16 +117,11 @@ export default function Inventory() {
         <div className="filters">
           <select value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)}>
             <option value="">All Categories</option>
-            <option value="Book">Book</option>
-            <option value="Map">Map</option>
-            <option value="Periodical">Periodical</option>
+            {categories.map(c => <option key={c.category_id} value={c.category_id}>{c.category_name}</option>)}
           </select>
           <select value={conditionFilter} onChange={e => setConditionFilter(e.target.value)}>
             <option value="">All Conditions</option>
-            <option value="Fine">Fine</option>
-            <option value="Good">Good</option>
-            <option value="Fair">Fair</option>
-            <option value="Poor">Poor</option>
+            {conditions.map(c => <option key={c.condition_id} value={c.condition_id}>{c.condition_name}</option>)}
           </select>
           <SearchBar value={search} onChange={setSearch} placeholder="Search title or keyword..." />
         </div>
@@ -83,16 +131,15 @@ export default function Inventory() {
       <SortableTable
         columns={[
           { key: 'title', label: 'Title' },
-          { key: 'category', label: 'Category' },
-          { key: 'condition', label: 'Condition' },
-          { key: 'quantity', label: 'Qty' },
-          { key: 'price', label: 'Market Price', render: r => `$${r.price.toFixed(2)}` },
+          { key: 'categoryName', label: 'Category' },
+          { key: 'conditionName', label: 'Condition' },
+          { key: 'quantity_on_hand', label: 'Qty' },
         ]}
         data={filtered}
         actions={(row) => (
           <>
-            <button className="btn btn-sm" onClick={(e) => { e.stopPropagation(); openEdit(row); }}>Edit</button>
-            <button className="btn btn-sm btn-danger" onClick={(e) => { e.stopPropagation(); setDeleteTarget(row); }}>Delete</button>
+            <button className="btn btn-sm" onClick={(e) => { e.stopPropagation(); openEdit(row) }}>Edit</button>
+            <button className="btn btn-sm btn-danger" onClick={(e) => { e.stopPropagation(); setDeleteTarget(row) }}>Delete</button>
           </>
         )}
       />
@@ -102,10 +149,9 @@ export default function Inventory() {
           <div className="form-grid">
             <label>Title<input type="text" value={form.title} onChange={e => updateForm('title', e.target.value)} /></label>
             <label>Category
-              <select value={form.category} onChange={e => updateForm('category', e.target.value)}>
-                <option value="Book">Book</option>
-                <option value="Map">Map</option>
-                <option value="Periodical">Periodical</option>
+              <select value={form.category_id} onChange={e => updateForm('category_id', e.target.value)}>
+                <option value="">Select...</option>
+                {categories.map(c => <option key={c.category_id} value={c.category_id}>{c.category_name}</option>)}
               </select>
             </label>
             <label className="full-width">Description<textarea value={form.description} onChange={e => updateForm('description', e.target.value)} rows={3} /></label>
@@ -113,14 +159,12 @@ export default function Inventory() {
             <label>Region<input type="text" value={form.region} onChange={e => updateForm('region', e.target.value)} /></label>
             <label>Format<input type="text" value={form.format} onChange={e => updateForm('format', e.target.value)} /></label>
             <label>Condition
-              <select value={form.condition} onChange={e => updateForm('condition', e.target.value)}>
-                <option value="Fine">Fine</option>
-                <option value="Good">Good</option>
-                <option value="Fair">Fair</option>
-                <option value="Poor">Poor</option>
+              <select value={form.condition_id} onChange={e => updateForm('condition_id', e.target.value)}>
+                <option value="">Select...</option>
+                {conditions.map(c => <option key={c.condition_id} value={c.condition_id}>{c.condition_name}</option>)}
               </select>
             </label>
-            <label>Quantity<input type="number" min="0" value={form.quantity} onChange={e => updateForm('quantity', parseInt(e.target.value) || 0)} /></label>
+            <label>Quantity<input type="number" min="0" value={form.quantity_on_hand} onChange={e => updateForm('quantity_on_hand', e.target.value)} /></label>
           </div>
         </Modal>
       )}
@@ -133,5 +177,5 @@ export default function Inventory() {
         />
       )}
     </div>
-  );
+  )
 }

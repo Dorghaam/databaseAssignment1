@@ -1,59 +1,84 @@
-import { useState } from 'react';
-import { specialRequests as initialRequests, contacts } from '../data/mockData';
-import SortableTable from '../components/SortableTable';
-import SearchBar from '../components/SearchBar';
-import Modal from '../components/Modal';
+import { useState, useEffect } from 'react'
+import { supabase } from '../lib/supabase'
+import SortableTable from '../components/SortableTable'
+import Modal from '../components/Modal'
+import ConfirmDialog from '../components/ConfirmDialog'
 
 export default function SpecialRequests() {
-  const [requestsList, setRequestsList] = useState(initialRequests);
-  const [statusFilter, setStatusFilter] = useState('');
-  const [showModal, setShowModal] = useState(false);
-  const [editRequest, setEditRequest] = useState(null);
-  const [form, setForm] = useState({ contactId: '', description: '', dateRequested: '', status: 'Open' });
+  const [requests, setRequests] = useState([])
+  const [contacts, setContacts] = useState([])
+  const [statusFilter, setStatusFilter] = useState('')
+  const [showModal, setShowModal] = useState(false)
+  const [editRequest, setEditRequest] = useState(null)
+  const [form, setForm] = useState({ contact_id: '', description: '', date_requested: '', status: 'Open' })
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [loading, setLoading] = useState(true)
 
-  const filtered = requestsList.filter(r => {
-    if (statusFilter && r.status !== statusFilter) return false;
-    return true;
-  });
+  const fetchRequests = async () => {
+    const { data } = await supabase
+      .from('reading_special_request')
+      .select('*, reading_contact(first_name, last_name)')
+      .order('date_requested', { ascending: false })
+    setRequests(data || [])
+    setLoading(false)
+  }
 
-  const tableData = filtered.map(r => {
-    const contact = contacts.find(c => c.id === r.contactId);
-    return { ...r, contactName: contact ? `${contact.firstName} ${contact.lastName}` : 'Unknown' };
-  });
+  const fetchContacts = async () => {
+    const { data } = await supabase.from('reading_contact').select('contact_id, first_name, last_name').order('last_name')
+    setContacts(data || [])
+  }
+
+  useEffect(() => { fetchRequests(); fetchContacts() }, [])
+
+  const tableData = (requests).filter(r => {
+    if (statusFilter && r.status !== statusFilter) return false
+    return true
+  }).map(r => ({
+    ...r,
+    id: r.request_id,
+    contactName: r.reading_contact ? `${r.reading_contact.first_name} ${r.reading_contact.last_name}` : 'Unknown',
+  }))
 
   const openAdd = () => {
-    setEditRequest(null);
-    setForm({ contactId: '', description: '', dateRequested: '', status: 'Open' });
-    setShowModal(true);
-  };
+    setEditRequest(null)
+    setForm({ contact_id: '', description: '', date_requested: '', status: 'Open' })
+    setShowModal(true)
+  }
 
-  const openEdit = (request) => {
-    setEditRequest(request);
-    setForm({ contactId: String(request.contactId), description: request.description, dateRequested: request.dateRequested, status: request.status });
-    setShowModal(true);
-  };
+  const openEdit = (row) => {
+    setEditRequest(row)
+    setForm({
+      contact_id: String(row.contact_id),
+      description: row.description,
+      date_requested: row.date_requested,
+      status: row.status,
+    })
+    setShowModal(true)
+  }
 
-  const handleSave = () => {
-    if (editRequest) {
-      setRequestsList(requestsList.map(r => r.id === editRequest.id ? {
-        ...r,
-        contactId: parseInt(form.contactId),
-        description: form.description,
-        dateRequested: form.dateRequested,
-        status: form.status,
-      } : r));
-    } else {
-      const newId = Math.max(...requestsList.map(r => r.id), 0) + 1;
-      setRequestsList([...requestsList, {
-        id: newId,
-        contactId: parseInt(form.contactId),
-        description: form.description,
-        dateRequested: form.dateRequested,
-        status: form.status,
-      }]);
+  const handleSave = async () => {
+    const payload = {
+      contact_id: parseInt(form.contact_id),
+      description: form.description,
+      date_requested: form.date_requested,
+      status: form.status,
     }
-    setShowModal(false);
-  };
+    if (editRequest) {
+      await supabase.from('reading_special_request').update(payload).eq('request_id', editRequest.request_id)
+    } else {
+      await supabase.from('reading_special_request').insert(payload)
+    }
+    setShowModal(false)
+    fetchRequests()
+  }
+
+  const handleDelete = async () => {
+    await supabase.from('reading_special_request').delete().eq('request_id', deleteTarget.request_id)
+    setDeleteTarget(null)
+    fetchRequests()
+  }
+
+  if (loading) return <div className="page"><h1>Special Requests</h1><p>Loading...</p></div>
 
   return (
     <div className="page">
@@ -75,14 +100,17 @@ export default function SpecialRequests() {
         columns={[
           { key: 'contactName', label: 'Contact' },
           { key: 'description', label: 'Description' },
-          { key: 'dateRequested', label: 'Date Requested' },
+          { key: 'date_requested', label: 'Date Requested' },
           { key: 'status', label: 'Status', render: r => (
             <span className={`status-badge status-${r.status.toLowerCase()}`}>{r.status}</span>
           )},
         ]}
         data={tableData}
         actions={(row) => (
-          <button className="btn btn-sm" onClick={(e) => { e.stopPropagation(); openEdit(row); }}>Edit</button>
+          <>
+            <button className="btn btn-sm" onClick={(e) => { e.stopPropagation(); openEdit(row) }}>Edit</button>
+            <button className="btn btn-sm btn-danger" onClick={(e) => { e.stopPropagation(); setDeleteTarget(row) }}>Delete</button>
+          </>
         )}
       />
 
@@ -90,14 +118,12 @@ export default function SpecialRequests() {
         <Modal title={editRequest ? 'Edit Request' : 'Add Request'} onClose={() => setShowModal(false)} onSave={handleSave}>
           <div className="form-grid">
             <label>Contact
-              <select value={form.contactId} onChange={e => setForm({ ...form, contactId: e.target.value })}>
+              <select value={form.contact_id} onChange={e => setForm({ ...form, contact_id: e.target.value })}>
                 <option value="">Select contact...</option>
-                {contacts.map(c => (
-                  <option key={c.id} value={c.id}>{c.firstName} {c.lastName}</option>
-                ))}
+                {contacts.map(c => <option key={c.contact_id} value={c.contact_id}>{c.first_name} {c.last_name}</option>)}
               </select>
             </label>
-            <label>Date Requested<input type="date" value={form.dateRequested} onChange={e => setForm({ ...form, dateRequested: e.target.value })} /></label>
+            <label>Date Requested<input type="date" value={form.date_requested} onChange={e => setForm({ ...form, date_requested: e.target.value })} /></label>
             <label className="full-width">Description<textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} rows={3} /></label>
             <label>Status
               <select value={form.status} onChange={e => setForm({ ...form, status: e.target.value })}>
@@ -109,6 +135,14 @@ export default function SpecialRequests() {
           </div>
         </Modal>
       )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          message={`Are you sure you want to delete this request?`}
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
-  );
+  )
 }

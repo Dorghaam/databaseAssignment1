@@ -1,58 +1,155 @@
-import { useState } from 'react';
-import { sales as initialSales, contacts, inventoryItems } from '../data/mockData';
-import SortableTable from '../components/SortableTable';
-import Modal from '../components/Modal';
+import { useState, useEffect } from 'react'
+import { supabase } from '../lib/supabase'
+import SortableTable from '../components/SortableTable'
+import Modal from '../components/Modal'
+import ConfirmDialog from '../components/ConfirmDialog'
 
-const emptyLineItem = { itemId: '', quantity: 1, price: 0 };
+const emptyLineItem = { item_id: '', quantity: 1, price: 0 }
 
 export default function Sales() {
-  const [salesList, setSalesList] = useState(initialSales);
-  const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({ contactId: '', date: '', lineItems: [{ ...emptyLineItem }] });
+  const [sales, setSales] = useState([])
+  const [contacts, setContacts] = useState([])
+  const [items, setItems] = useState([])
+  const [showModal, setShowModal] = useState(false)
+  const [editSale, setEditSale] = useState(null)
+  const [form, setForm] = useState({ contact_id: '', sale_date: '', lineItems: [{ ...emptyLineItem }] })
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [loading, setLoading] = useState(true)
 
-  const tableData = salesList.map(s => {
-    const contact = contacts.find(c => c.id === s.contactId);
-    const total = s.lineItems.reduce((sum, li) => sum + li.price * li.quantity, 0);
+  const fetchSales = async () => {
+    const { data } = await supabase
+      .from('reading_sale')
+      .select(`
+        *,
+        reading_contact(first_name, last_name),
+        reading_sale_item(*, reading_item(title))
+      `)
+      .order('sale_date', { ascending: false })
+    setSales(data || [])
+    setLoading(false)
+  }
+
+  const fetchLookups = async () => {
+    const { data: c } = await supabase.from('reading_contact').select('contact_id, first_name, last_name').order('last_name')
+    const { data: i } = await supabase.from('reading_item').select('item_id, title').order('title')
+    setContacts(c || [])
+    setItems(i || [])
+  }
+
+  useEffect(() => { fetchSales(); fetchLookups() }, [])
+
+  const tableData = sales.map(s => {
+    const contact = s.reading_contact
+    const lineItems = s.reading_sale_item || []
+    const total = lineItems.reduce((sum, li) => sum + li.sale_price * li.quantity, 0)
     return {
-      id: s.id,
-      date: s.date,
-      buyer: contact ? `${contact.firstName} ${contact.lastName}` : 'Unknown',
-      itemCount: s.lineItems.length,
+      ...s,
+      id: s.sale_id,
+      buyer: contact ? `${contact.first_name} ${contact.last_name}` : 'Unknown',
+      itemCount: lineItems.length,
       total,
-    };
-  });
+    }
+  })
 
   const openAdd = () => {
-    setForm({ contactId: '', date: '', lineItems: [{ ...emptyLineItem }] });
-    setShowModal(true);
-  };
+    setEditSale(null)
+    setForm({ contact_id: '', sale_date: '', lineItems: [{ ...emptyLineItem }] })
+    setShowModal(true)
+  }
 
-  const handleSave = () => {
-    const newId = Math.max(...salesList.map(s => s.id), 0) + 1;
-    setSalesList([...salesList, {
-      id: newId,
-      contactId: parseInt(form.contactId),
-      date: form.date,
-      lineItems: form.lineItems.map(li => ({ itemId: parseInt(li.itemId), quantity: parseInt(li.quantity) || 1, price: parseFloat(li.price) || 0 })),
-    }]);
-    setShowModal(false);
-  };
+  const openEdit = (sale) => {
+    setEditSale(sale)
+    const lineItems = (sale.reading_sale_item || []).map(li => ({
+      item_id: String(li.item_id),
+      quantity: li.quantity,
+      price: li.sale_price,
+    }))
+    setForm({
+      contact_id: String(sale.contact_id),
+      sale_date: sale.sale_date,
+      lineItems: lineItems.length > 0 ? lineItems : [{ ...emptyLineItem }],
+    })
+    setShowModal(true)
+  }
+
+  // helper to update an items quantity on hand
+  const updateQty = async (itemId, change) => {
+    const { data: item } = await supabase.from('reading_item').select('quantity_on_hand').eq('item_id', itemId).single()
+    if (item) {
+      await supabase.from('reading_item').update({ quantity_on_hand: item.quantity_on_hand + change }).eq('item_id', itemId)
+    }
+  }
+
+  const handleSave = async () => {
+    const parsedLines = form.lineItems
+      .filter(li => li.item_id)
+      .map(li => ({ item_id: parseInt(li.item_id), quantity: parseInt(li.quantity) || 1, sale_price: parseFloat(li.price) || 0 }))
+
+    if (editSale) {
+      // reverse old quantities (undo the decreases from the original sale)
+      const oldLines = editSale.reading_sale_item || []
+      for (const li of oldLines) {
+        await updateQty(li.item_id, li.quantity)
+      }
+
+      // delete old line items then update the sale header
+      await supabase.from('reading_sale_item').delete().eq('sale_id', editSale.sale_id)
+      await supabase.from('reading_sale').update({
+        contact_id: parseInt(form.contact_id),
+        sale_date: form.sale_date,
+      }).eq('sale_id', editSale.sale_id)
+
+      // insert new line items and decrease quantities
+      for (const li of parsedLines) {
+        await supabase.from('reading_sale_item').insert({ sale_id: editSale.sale_id, ...li })
+        await updateQty(li.item_id, -li.quantity)
+      }
+    } else {
+      // create the sale
+      const { data: newSale } = await supabase.from('reading_sale').insert({
+        contact_id: parseInt(form.contact_id),
+        sale_date: form.sale_date,
+      }).select().single()
+
+      // insert line items and decrease quantities
+      for (const li of parsedLines) {
+        await supabase.from('reading_sale_item').insert({ sale_id: newSale.sale_id, ...li })
+        await updateQty(li.item_id, -li.quantity)
+      }
+    }
+
+    setShowModal(false)
+    fetchSales()
+  }
+
+  const handleDelete = async () => {
+    // reverse quantities before deleting (undo the decreases)
+    const oldLines = deleteTarget.reading_sale_item || []
+    for (const li of oldLines) {
+      await updateQty(li.item_id, li.quantity)
+    }
+    await supabase.from('reading_sale').delete().eq('sale_id', deleteTarget.sale_id)
+    setDeleteTarget(null)
+    fetchSales()
+  }
 
   const updateLineItem = (index, field, value) => {
     setForm(f => {
-      const items = [...f.lineItems];
-      items[index] = { ...items[index], [field]: value };
-      return { ...f, lineItems: items };
-    });
-  };
+      const items = [...f.lineItems]
+      items[index] = { ...items[index], [field]: value }
+      return { ...f, lineItems: items }
+    })
+  }
 
   const addLineItem = () => {
-    setForm(f => ({ ...f, lineItems: [...f.lineItems, { ...emptyLineItem }] }));
-  };
+    setForm(f => ({ ...f, lineItems: [...f.lineItems, { ...emptyLineItem }] }))
+  }
 
   const removeLineItem = (index) => {
-    setForm(f => ({ ...f, lineItems: f.lineItems.filter((_, i) => i !== index) }));
-  };
+    setForm(f => ({ ...f, lineItems: f.lineItems.filter((_, i) => i !== index) }))
+  }
+
+  if (loading) return <div className="page"><h1>Sales</h1><p>Loading...</p></div>
 
   return (
     <div className="page">
@@ -65,37 +162,39 @@ export default function Sales() {
 
       <SortableTable
         columns={[
-          { key: 'date', label: 'Date' },
+          { key: 'sale_date', label: 'Date' },
           { key: 'buyer', label: 'Buyer' },
           { key: 'itemCount', label: 'Items' },
           { key: 'total', label: 'Total', render: r => `$${r.total.toFixed(2)}` },
         ]}
         data={tableData}
+        actions={(row) => (
+          <>
+            <button className="btn btn-sm" onClick={(e) => { e.stopPropagation(); openEdit(row) }}>Edit</button>
+            <button className="btn btn-sm btn-danger" onClick={(e) => { e.stopPropagation(); setDeleteTarget(row) }}>Delete</button>
+          </>
+        )}
       />
 
       {showModal && (
-        <Modal title="Add Sale" onClose={() => setShowModal(false)} onSave={handleSave}>
+        <Modal title={editSale ? 'Edit Sale' : 'Add Sale'} onClose={() => setShowModal(false)} onSave={handleSave}>
           <div className="form-grid">
             <label>Contact
-              <select value={form.contactId} onChange={e => setForm({ ...form, contactId: e.target.value })}>
+              <select value={form.contact_id} onChange={e => setForm({ ...form, contact_id: e.target.value })}>
                 <option value="">Select contact...</option>
-                {contacts.map(c => (
-                  <option key={c.id} value={c.id}>{c.firstName} {c.lastName}</option>
-                ))}
+                {contacts.map(c => <option key={c.contact_id} value={c.contact_id}>{c.first_name} {c.last_name}</option>)}
               </select>
             </label>
-            <label>Sale Date<input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></label>
+            <label>Sale Date<input type="date" value={form.sale_date} onChange={e => setForm({ ...form, sale_date: e.target.value })} /></label>
           </div>
 
           <div className="form-section">
             <h4>Line Items</h4>
             {form.lineItems.map((li, i) => (
               <div key={i} className="line-item-row">
-                <select value={li.itemId} onChange={e => updateLineItem(i, 'itemId', e.target.value)}>
+                <select value={li.item_id} onChange={e => updateLineItem(i, 'item_id', e.target.value)}>
                   <option value="">Select item...</option>
-                  {inventoryItems.map(item => (
-                    <option key={item.id} value={item.id}>{item.title}</option>
-                  ))}
+                  {items.map(item => <option key={item.item_id} value={item.item_id}>{item.title}</option>)}
                 </select>
                 <input type="number" min="1" placeholder="Qty" value={li.quantity} onChange={e => updateLineItem(i, 'quantity', e.target.value)} />
                 <input type="number" min="0" step="0.01" placeholder="Price" value={li.price} onChange={e => updateLineItem(i, 'price', e.target.value)} />
@@ -108,6 +207,14 @@ export default function Sales() {
           </div>
         </Modal>
       )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          message="Are you sure you want to delete this sale? Quantity on hand will be reversed."
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
-  );
+  )
 }

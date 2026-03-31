@@ -1,61 +1,169 @@
-import { useState } from 'react';
-import { purchases as initialPurchases, contacts, inventoryItems } from '../data/mockData';
-import SortableTable from '../components/SortableTable';
-import Modal from '../components/Modal';
+import { useState, useEffect } from 'react'
+import { supabase } from '../lib/supabase'
+import SortableTable from '../components/SortableTable'
+import Modal from '../components/Modal'
+import ConfirmDialog from '../components/ConfirmDialog'
 
-const emptyLineItem = { itemId: '', quantity: 1, price: 0 };
+const emptyLineItem = { item_id: '', quantity: 1, price: 0 }
 
 export default function Purchases() {
-  const [purchasesList, setPurchasesList] = useState(initialPurchases);
-  const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({ contactId: '', date: '', acquisitionType: 'Individual', donationNote: '', lineItems: [{ ...emptyLineItem }] });
+  const [purchases, setPurchases] = useState([])
+  const [contacts, setContacts] = useState([])
+  const [items, setItems] = useState([])
+  const [acqTypes, setAcqTypes] = useState([])
+  const [showModal, setShowModal] = useState(false)
+  const [editPurchase, setEditPurchase] = useState(null)
+  const [form, setForm] = useState({ contact_id: '', purchase_date: '', acquisition_type_id: '', estate_donation_note: '', lineItems: [{ ...emptyLineItem }] })
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [loading, setLoading] = useState(true)
 
-  const tableData = purchasesList.map(p => {
-    const contact = contacts.find(c => c.id === p.contactId);
-    const total = p.lineItems.reduce((sum, li) => sum + li.price * li.quantity, 0);
+  const fetchPurchases = async () => {
+    const { data } = await supabase
+      .from('reading_purchase')
+      .select(`
+        *,
+        reading_contact(first_name, last_name),
+        reading_acquisition_type(type_name),
+        reading_purchase_item(*, reading_item(title))
+      `)
+      .order('purchase_date', { ascending: false })
+    setPurchases(data || [])
+    setLoading(false)
+  }
+
+  const fetchLookups = async () => {
+    const { data: c } = await supabase.from('reading_contact').select('contact_id, first_name, last_name').order('last_name')
+    const { data: i } = await supabase.from('reading_item').select('item_id, title').order('title')
+    const { data: a } = await supabase.from('reading_acquisition_type').select('*').order('acquisition_type_id')
+    setContacts(c || [])
+    setItems(i || [])
+    setAcqTypes(a || [])
+  }
+
+  useEffect(() => { fetchPurchases(); fetchLookups() }, [])
+
+  const tableData = purchases.map(p => {
+    const contact = p.reading_contact
+    const lineItems = p.reading_purchase_item || []
+    const total = lineItems.reduce((sum, li) => sum + li.purchase_price * li.quantity, 0)
     return {
-      id: p.id,
-      date: p.date,
-      supplier: contact ? `${contact.firstName} ${contact.lastName}` : 'Unknown',
-      acquisitionType: p.acquisitionType,
-      itemCount: p.lineItems.length,
+      ...p,
+      id: p.purchase_id,
+      supplier: contact ? `${contact.first_name} ${contact.last_name}` : 'Unknown',
+      typeName: p.reading_acquisition_type?.type_name || '',
+      itemCount: lineItems.length,
       total,
-    };
-  });
+    }
+  })
+
+  // checks which acquisition type is estate so we know when to show the donation note field
+  const estateType = acqTypes.find(a => a.type_name === 'Estate')
 
   const openAdd = () => {
-    setForm({ contactId: '', date: '', acquisitionType: 'Individual', donationNote: '', lineItems: [{ ...emptyLineItem }] });
-    setShowModal(true);
-  };
+    setEditPurchase(null)
+    setForm({ contact_id: '', purchase_date: '', acquisition_type_id: '', estate_donation_note: '', lineItems: [{ ...emptyLineItem }] })
+    setShowModal(true)
+  }
 
-  const handleSave = () => {
-    const newId = Math.max(...purchasesList.map(p => p.id), 0) + 1;
-    setPurchasesList([...purchasesList, {
-      id: newId,
-      contactId: parseInt(form.contactId),
-      date: form.date,
-      acquisitionType: form.acquisitionType,
-      donationNote: form.donationNote,
-      lineItems: form.lineItems.map(li => ({ itemId: parseInt(li.itemId), quantity: parseInt(li.quantity) || 1, price: parseFloat(li.price) || 0 })),
-    }]);
-    setShowModal(false);
-  };
+  const openEdit = (purchase) => {
+    setEditPurchase(purchase)
+    const lineItems = (purchase.reading_purchase_item || []).map(li => ({
+      item_id: String(li.item_id),
+      quantity: li.quantity,
+      price: li.purchase_price,
+    }))
+    setForm({
+      contact_id: String(purchase.contact_id),
+      purchase_date: purchase.purchase_date,
+      acquisition_type_id: String(purchase.acquisition_type_id),
+      estate_donation_note: purchase.estate_donation_note || '',
+      lineItems: lineItems.length > 0 ? lineItems : [{ ...emptyLineItem }],
+    })
+    setShowModal(true)
+  }
+
+  // helper to update an items quantity on hand
+  const updateQty = async (itemId, change) => {
+    const { data: item } = await supabase.from('reading_item').select('quantity_on_hand').eq('item_id', itemId).single()
+    if (item) {
+      await supabase.from('reading_item').update({ quantity_on_hand: item.quantity_on_hand + change }).eq('item_id', itemId)
+    }
+  }
+
+  const handleSave = async () => {
+    const parsedLines = form.lineItems
+      .filter(li => li.item_id)
+      .map(li => ({ item_id: parseInt(li.item_id), quantity: parseInt(li.quantity) || 1, purchase_price: parseFloat(li.price) || 0 }))
+
+    if (editPurchase) {
+      // reverse old quantities (undo the increases from the original purchase)
+      const oldLines = editPurchase.reading_purchase_item || []
+      for (const li of oldLines) {
+        await updateQty(li.item_id, -li.quantity)
+      }
+
+      // delete old line items then update the purchase header
+      await supabase.from('reading_purchase_item').delete().eq('purchase_id', editPurchase.purchase_id)
+      await supabase.from('reading_purchase').update({
+        contact_id: parseInt(form.contact_id),
+        purchase_date: form.purchase_date,
+        acquisition_type_id: parseInt(form.acquisition_type_id),
+        estate_donation_note: form.estate_donation_note || null,
+      }).eq('purchase_id', editPurchase.purchase_id)
+
+      // insert new line items and increase quantities
+      for (const li of parsedLines) {
+        await supabase.from('reading_purchase_item').insert({ purchase_id: editPurchase.purchase_id, ...li })
+        await updateQty(li.item_id, li.quantity)
+      }
+    } else {
+      // create the purchase
+      const { data: newPurchase } = await supabase.from('reading_purchase').insert({
+        contact_id: parseInt(form.contact_id),
+        purchase_date: form.purchase_date,
+        acquisition_type_id: parseInt(form.acquisition_type_id),
+        estate_donation_note: form.estate_donation_note || null,
+      }).select().single()
+
+      // insert line items and increase quantities
+      for (const li of parsedLines) {
+        await supabase.from('reading_purchase_item').insert({ purchase_id: newPurchase.purchase_id, ...li })
+        await updateQty(li.item_id, li.quantity)
+      }
+    }
+
+    setShowModal(false)
+    fetchPurchases()
+  }
+
+  const handleDelete = async () => {
+    // reverse quantities before deleting (undo the increases)
+    const oldLines = deleteTarget.reading_purchase_item || []
+    for (const li of oldLines) {
+      await updateQty(li.item_id, -li.quantity)
+    }
+    await supabase.from('reading_purchase').delete().eq('purchase_id', deleteTarget.purchase_id)
+    setDeleteTarget(null)
+    fetchPurchases()
+  }
 
   const updateLineItem = (index, field, value) => {
     setForm(f => {
-      const items = [...f.lineItems];
-      items[index] = { ...items[index], [field]: value };
-      return { ...f, lineItems: items };
-    });
-  };
+      const items = [...f.lineItems]
+      items[index] = { ...items[index], [field]: value }
+      return { ...f, lineItems: items }
+    })
+  }
 
   const addLineItem = () => {
-    setForm(f => ({ ...f, lineItems: [...f.lineItems, { ...emptyLineItem }] }));
-  };
+    setForm(f => ({ ...f, lineItems: [...f.lineItems, { ...emptyLineItem }] }))
+  }
 
   const removeLineItem = (index) => {
-    setForm(f => ({ ...f, lineItems: f.lineItems.filter((_, i) => i !== index) }));
-  };
+    setForm(f => ({ ...f, lineItems: f.lineItems.filter((_, i) => i !== index) }))
+  }
+
+  if (loading) return <div className="page"><h1>Purchases</h1><p>Loading...</p></div>
 
   return (
     <div className="page">
@@ -68,39 +176,42 @@ export default function Purchases() {
 
       <SortableTable
         columns={[
-          { key: 'date', label: 'Date' },
+          { key: 'purchase_date', label: 'Date' },
           { key: 'supplier', label: 'Supplier' },
-          { key: 'acquisitionType', label: 'Acquisition Type' },
+          { key: 'typeName', label: 'Acquisition Type' },
           { key: 'itemCount', label: 'Items' },
           { key: 'total', label: 'Total Cost', render: r => `$${r.total.toFixed(2)}` },
         ]}
         data={tableData}
+        actions={(row) => (
+          <>
+            <button className="btn btn-sm" onClick={(e) => { e.stopPropagation(); openEdit(row) }}>Edit</button>
+            <button className="btn btn-sm btn-danger" onClick={(e) => { e.stopPropagation(); setDeleteTarget(row) }}>Delete</button>
+          </>
+        )}
       />
 
       {showModal && (
-        <Modal title="Add Purchase" onClose={() => setShowModal(false)} onSave={handleSave}>
+        <Modal title={editPurchase ? 'Edit Purchase' : 'Add Purchase'} onClose={() => setShowModal(false)} onSave={handleSave}>
           <div className="form-grid">
             <label>Contact
-              <select value={form.contactId} onChange={e => setForm({ ...form, contactId: e.target.value })}>
+              <select value={form.contact_id} onChange={e => setForm({ ...form, contact_id: e.target.value })}>
                 <option value="">Select contact...</option>
-                {contacts.map(c => (
-                  <option key={c.id} value={c.id}>{c.firstName} {c.lastName}</option>
-                ))}
+                {contacts.map(c => <option key={c.contact_id} value={c.contact_id}>{c.first_name} {c.last_name}</option>)}
               </select>
             </label>
-            <label>Purchase Date<input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></label>
+            <label>Purchase Date<input type="date" value={form.purchase_date} onChange={e => setForm({ ...form, purchase_date: e.target.value })} /></label>
             <label>Acquisition Type
-              <select value={form.acquisitionType} onChange={e => setForm({ ...form, acquisitionType: e.target.value })}>
-                <option value="Individual">Individual</option>
-                <option value="Dealer">Dealer</option>
-                <option value="Estate">Estate</option>
+              <select value={form.acquisition_type_id} onChange={e => setForm({ ...form, acquisition_type_id: e.target.value })}>
+                <option value="">Select...</option>
+                {acqTypes.map(a => <option key={a.acquisition_type_id} value={a.acquisition_type_id}>{a.type_name}</option>)}
               </select>
             </label>
           </div>
 
-          {form.acquisitionType === 'Estate' && (
+          {estateType && form.acquisition_type_id === String(estateType.acquisition_type_id) && (
             <div className="form-section">
-              <label className="full-width">Donation Note<textarea value={form.donationNote} onChange={e => setForm({ ...form, donationNote: e.target.value })} rows={3} placeholder="Notes about items sent to libraries..." /></label>
+              <label className="full-width">Donation Note<textarea value={form.estate_donation_note} onChange={e => setForm({ ...form, estate_donation_note: e.target.value })} rows={3} placeholder="Notes about items sent to libraries..." /></label>
             </div>
           )}
 
@@ -108,11 +219,9 @@ export default function Purchases() {
             <h4>Line Items</h4>
             {form.lineItems.map((li, i) => (
               <div key={i} className="line-item-row">
-                <select value={li.itemId} onChange={e => updateLineItem(i, 'itemId', e.target.value)}>
+                <select value={li.item_id} onChange={e => updateLineItem(i, 'item_id', e.target.value)}>
                   <option value="">Select item...</option>
-                  {inventoryItems.map(item => (
-                    <option key={item.id} value={item.id}>{item.title}</option>
-                  ))}
+                  {items.map(item => <option key={item.item_id} value={item.item_id}>{item.title}</option>)}
                 </select>
                 <input type="number" min="1" placeholder="Qty" value={li.quantity} onChange={e => updateLineItem(i, 'quantity', e.target.value)} />
                 <input type="number" min="0" step="0.01" placeholder="Price" value={li.price} onChange={e => updateLineItem(i, 'price', e.target.value)} />
@@ -125,6 +234,14 @@ export default function Purchases() {
           </div>
         </Modal>
       )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          message="Are you sure you want to delete this purchase? Quantity on hand will be reversed."
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
-  );
+  )
 }

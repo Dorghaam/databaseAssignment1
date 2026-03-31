@@ -1,51 +1,101 @@
-import { useState } from 'react';
-import { marketPrices as initialPrices, inventoryItems } from '../data/mockData';
-import SortableTable from '../components/SortableTable';
-import Modal from '../components/Modal';
+import { useState, useEffect } from 'react'
+import { supabase } from '../lib/supabase'
+import SortableTable from '../components/SortableTable'
+import Modal from '../components/Modal'
+import ConfirmDialog from '../components/ConfirmDialog'
 
 export default function MarketPrices() {
-  const [pricesList, setPricesList] = useState(initialPrices);
-  const [showModal, setShowModal] = useState(false);
-  const [selectedItemId, setSelectedItemId] = useState(null);
-  const [form, setForm] = useState({ itemId: '', condition: 'Good', price: '', dateChecked: '', source: 'Website' });
+  const [prices, setPrices] = useState([])
+  const [items, setItems] = useState([])
+  const [conditions, setConditions] = useState([])
+  const [selectedItemId, setSelectedItemId] = useState(null)
+  const [showModal, setShowModal] = useState(false)
+  const [editPrice, setEditPrice] = useState(null)
+  const [form, setForm] = useState({ item_id: '', condition_id: '', price: '', date_checked: '', source: 'Website' })
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [loading, setLoading] = useState(true)
 
-  const tableData = pricesList.map(p => {
-    const item = inventoryItems.find(i => i.id === p.itemId);
-    return { ...p, itemTitle: item ? item.title : 'Unknown' };
-  });
+  const fetchPrices = async () => {
+    const { data } = await supabase
+      .from('reading_market_price')
+      .select('*, reading_item(title), reading_condition(condition_name)')
+      .order('date_checked', { ascending: false })
+    setPrices(data || [])
+    setLoading(false)
+  }
+
+  const fetchLookups = async () => {
+    const { data: itemData } = await supabase.from('reading_item').select('item_id, title').order('title')
+    const { data: condData } = await supabase.from('reading_condition').select('*').order('condition_id')
+    setItems(itemData || [])
+    setConditions(condData || [])
+  }
+
+  useEffect(() => { fetchPrices(); fetchLookups() }, [])
+
+  const tableData = prices.map(p => ({
+    ...p,
+    id: p.market_price_id,
+    itemTitle: p.reading_item?.title || 'Unknown',
+    conditionName: p.reading_condition?.condition_name || '',
+  }))
 
   const openAdd = () => {
-    setForm({ itemId: '', condition: 'Good', price: '', dateChecked: '', source: 'Website' });
-    setShowModal(true);
-  };
+    setEditPrice(null)
+    setForm({ item_id: '', condition_id: '', price: '', date_checked: '', source: 'Website' })
+    setShowModal(true)
+  }
 
-  const handleSave = () => {
-    const newId = Math.max(...pricesList.map(p => p.id), 0) + 1;
-    setPricesList([...pricesList, {
-      id: newId,
-      itemId: parseInt(form.itemId),
-      condition: form.condition,
+  const openEdit = (row) => {
+    setEditPrice(row)
+    setForm({
+      item_id: String(row.item_id),
+      condition_id: String(row.condition_id),
+      price: String(row.price),
+      date_checked: row.date_checked,
+      source: row.source,
+    })
+    setShowModal(true)
+  }
+
+  const handleSave = async () => {
+    const payload = {
+      item_id: parseInt(form.item_id),
+      condition_id: parseInt(form.condition_id),
       price: parseFloat(form.price) || 0,
-      dateChecked: form.dateChecked,
+      date_checked: form.date_checked,
       source: form.source,
-    }]);
-    setShowModal(false);
-  };
+    }
+    if (editPrice) {
+      await supabase.from('reading_market_price').update(payload).eq('market_price_id', editPrice.market_price_id)
+    } else {
+      await supabase.from('reading_market_price').insert(payload)
+    }
+    setShowModal(false)
+    fetchPrices()
+  }
 
-  // Price history for selected item
+  const handleDelete = async () => {
+    await supabase.from('reading_market_price').delete().eq('market_price_id', deleteTarget.market_price_id)
+    setDeleteTarget(null)
+    fetchPrices()
+  }
+
+  // price history for the selected item grouped by condition
   const priceHistory = selectedItemId
-    ? pricesList
-        .filter(p => p.itemId === selectedItemId)
-        .sort((a, b) => b.dateChecked.localeCompare(a.dateChecked))
-    : [];
+    ? prices.filter(p => p.item_id === selectedItemId).sort((a, b) => b.date_checked.localeCompare(a.date_checked))
+    : []
 
-  const historyByCondition = {};
+  const historyByCondition = {}
   priceHistory.forEach(p => {
-    if (!historyByCondition[p.condition]) historyByCondition[p.condition] = [];
-    historyByCondition[p.condition].push(p);
-  });
+    const name = p.reading_condition?.condition_name || 'Unknown'
+    if (!historyByCondition[name]) historyByCondition[name] = []
+    historyByCondition[name].push(p)
+  })
 
-  const selectedItem = inventoryItems.find(i => i.id === selectedItemId);
+  const selectedItem = items.find(i => i.item_id === selectedItemId)
+
+  if (loading) return <div className="page"><h1>Market Prices</h1><p>Loading...</p></div>
 
   return (
     <div className="page">
@@ -59,13 +109,19 @@ export default function MarketPrices() {
       <SortableTable
         columns={[
           { key: 'itemTitle', label: 'Item' },
-          { key: 'condition', label: 'Condition' },
+          { key: 'conditionName', label: 'Condition' },
           { key: 'price', label: 'Price', render: r => `$${r.price.toFixed(2)}` },
-          { key: 'dateChecked', label: 'Date Checked' },
+          { key: 'date_checked', label: 'Date Checked' },
           { key: 'source', label: 'Source' },
         ]}
         data={tableData}
-        onRowClick={(row) => setSelectedItemId(row.itemId)}
+        onRowClick={(row) => setSelectedItemId(row.item_id)}
+        actions={(row) => (
+          <>
+            <button className="btn btn-sm" onClick={(e) => { e.stopPropagation(); openEdit(row) }}>Edit</button>
+            <button className="btn btn-sm btn-danger" onClick={(e) => { e.stopPropagation(); setDeleteTarget(row) }}>Delete</button>
+          </>
+        )}
       />
 
       {selectedItemId && (
@@ -82,17 +138,13 @@ export default function MarketPrices() {
                 <h4>{condition}</h4>
                 <table>
                   <thead>
-                    <tr>
-                      <th>Price</th>
-                      <th>Date</th>
-                      <th>Source</th>
-                    </tr>
+                    <tr><th>Price</th><th>Date</th><th>Source</th></tr>
                   </thead>
                   <tbody>
                     {entries.map(e => (
-                      <tr key={e.id}>
+                      <tr key={e.market_price_id}>
                         <td>${e.price.toFixed(2)}</td>
-                        <td>{e.dateChecked}</td>
+                        <td>{e.date_checked}</td>
                         <td>{e.source}</td>
                       </tr>
                     ))}
@@ -105,26 +157,22 @@ export default function MarketPrices() {
       )}
 
       {showModal && (
-        <Modal title="Add Price Entry" onClose={() => setShowModal(false)} onSave={handleSave}>
+        <Modal title={editPrice ? 'Edit Price Entry' : 'Add Price Entry'} onClose={() => setShowModal(false)} onSave={handleSave}>
           <div className="form-grid">
             <label>Item
-              <select value={form.itemId} onChange={e => setForm({ ...form, itemId: e.target.value })}>
+              <select value={form.item_id} onChange={e => setForm({ ...form, item_id: e.target.value })}>
                 <option value="">Select item...</option>
-                {inventoryItems.map(item => (
-                  <option key={item.id} value={item.id}>{item.title}</option>
-                ))}
+                {items.map(item => <option key={item.item_id} value={item.item_id}>{item.title}</option>)}
               </select>
             </label>
             <label>Condition
-              <select value={form.condition} onChange={e => setForm({ ...form, condition: e.target.value })}>
-                <option value="Fine">Fine</option>
-                <option value="Good">Good</option>
-                <option value="Fair">Fair</option>
-                <option value="Poor">Poor</option>
+              <select value={form.condition_id} onChange={e => setForm({ ...form, condition_id: e.target.value })}>
+                <option value="">Select...</option>
+                {conditions.map(c => <option key={c.condition_id} value={c.condition_id}>{c.condition_name}</option>)}
               </select>
             </label>
             <label>Price<input type="number" min="0" step="0.01" value={form.price} onChange={e => setForm({ ...form, price: e.target.value })} /></label>
-            <label>Date Checked<input type="date" value={form.dateChecked} onChange={e => setForm({ ...form, dateChecked: e.target.value })} /></label>
+            <label>Date Checked<input type="date" value={form.date_checked} onChange={e => setForm({ ...form, date_checked: e.target.value })} /></label>
             <label>Source
               <select value={form.source} onChange={e => setForm({ ...form, source: e.target.value })}>
                 <option value="Website">Website</option>
@@ -136,6 +184,14 @@ export default function MarketPrices() {
           </div>
         </Modal>
       )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          message="Are you sure you want to delete this price entry?"
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
-  );
+  )
 }
