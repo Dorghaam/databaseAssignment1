@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { useToast } from '../contexts/ToastContext'
 import SortableTable from '../components/SortableTable'
 import Modal from '../components/Modal'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -13,12 +14,17 @@ export default function SpecialRequests() {
   const [form, setForm] = useState({ contact_id: '', description: '', date_requested: '', status: 'Open' })
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [loading, setLoading] = useState(true)
+  const { showToast } = useToast()
 
   const fetchRequests = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('reading_special_request')
       .select('*, reading_contact(first_name, last_name)')
       .order('date_requested', { ascending: false })
+    if (error) {
+      showToast('Failed to load special requests', 'error')
+      return
+    }
     setRequests(data || [])
     setLoading(false)
   }
@@ -57,23 +63,54 @@ export default function SpecialRequests() {
   }
 
   const handleSave = async () => {
+    // validate required fields
+    if (!form.contact_id) {
+      showToast('Please select a contact', 'error')
+      return
+    }
+    if (!form.description.trim()) {
+      showToast('Description is required', 'error')
+      return
+    }
+    if (!form.date_requested) {
+      showToast('Date requested is required', 'error')
+      return
+    }
+
     const payload = {
       contact_id: parseInt(form.contact_id),
-      description: form.description,
+      description: form.description.trim(),
       date_requested: form.date_requested,
       status: form.status,
     }
+
     if (editRequest) {
-      await supabase.from('reading_special_request').update(payload).eq('request_id', editRequest.request_id)
+      const { error } = await supabase.from('reading_special_request').update(payload).eq('request_id', editRequest.request_id)
+      if (error) {
+        showToast('Failed to update request', 'error')
+        return
+      }
+      showToast('Request updated successfully', 'success')
     } else {
-      await supabase.from('reading_special_request').insert(payload)
+      const { error } = await supabase.from('reading_special_request').insert(payload)
+      if (error) {
+        showToast('Failed to add request', 'error')
+        return
+      }
+      showToast('Request added successfully', 'success')
     }
     setShowModal(false)
     fetchRequests()
   }
 
   const handleDelete = async () => {
-    await supabase.from('reading_special_request').delete().eq('request_id', deleteTarget.request_id)
+    const { error } = await supabase.from('reading_special_request').delete().eq('request_id', deleteTarget.request_id)
+    if (error) {
+      showToast('Failed to delete request', 'error')
+      setDeleteTarget(null)
+      return
+    }
+    showToast('Request deleted successfully', 'success')
     setDeleteTarget(null)
     fetchRequests()
   }

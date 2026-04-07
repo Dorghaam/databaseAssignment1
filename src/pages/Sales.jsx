@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { useToast } from '../contexts/ToastContext'
 import SortableTable from '../components/SortableTable'
 import Modal from '../components/Modal'
 import ConfirmDialog from '../components/ConfirmDialog'
 
-const emptyLineItem = { item_id: '', quantity: 1, price: 0 }
+const emptyLineItem = { item_id: '', quantity: 1, price: '' }
 
 export default function Sales() {
   const [sales, setSales] = useState([])
@@ -15,9 +16,10 @@ export default function Sales() {
   const [form, setForm] = useState({ contact_id: '', sale_date: '', lineItems: [{ ...emptyLineItem }] })
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [loading, setLoading] = useState(true)
+  const { showToast } = useToast()
 
   const fetchSales = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('reading_sale')
       .select(`
         *,
@@ -25,6 +27,10 @@ export default function Sales() {
         reading_sale_item(*, reading_item(title))
       `)
       .order('sale_date', { ascending: false })
+    if (error) {
+      showToast('Failed to load sales', 'error')
+      return
+    }
     setSales(data || [])
     setLoading(false)
   }
@@ -81,9 +87,57 @@ export default function Sales() {
   }
 
   const handleSave = async () => {
-    const parsedLines = form.lineItems
-      .filter(li => li.item_id)
-      .map(li => ({ item_id: parseInt(li.item_id), quantity: parseInt(li.quantity) || 1, sale_price: parseFloat(li.price) || 0 }))
+    // validate required fields
+    if (!form.contact_id) {
+      showToast('Please select a contact', 'error')
+      return
+    }
+    if (!form.sale_date) {
+      showToast('Sale date is required', 'error')
+      return
+    }
+
+    // validate line items
+    const validLines = form.lineItems.filter(li => li.item_id)
+    if (validLines.length === 0) {
+      showToast('Please add at least one item', 'error')
+      return
+    }
+
+    // validate prices and quantities for each line item
+    for (let i = 0; i < validLines.length; i++) {
+      const li = validLines[i]
+      const price = parseFloat(li.price)
+      const qty = parseInt(li.quantity)
+
+      // check if price is a valid number
+      if (li.price === '' || isNaN(price)) {
+        showToast(`Item ${i + 1}: price must be a valid number`, 'error')
+        return
+      }
+      // check for negative price
+      if (price < 0) {
+        showToast(`Item ${i + 1}: price cannot be negative`, 'error')
+        return
+      }
+      // check for infinite or unreasonable values
+      if (!isFinite(price)) {
+        showToast(`Item ${i + 1}: price is not a valid number`, 'error')
+        return
+      }
+      // check quantity
+      if (isNaN(qty) || qty < 1) {
+        showToast(`Item ${i + 1}: quantity must be at least 1`, 'error')
+        return
+      }
+    }
+
+    // round prices to 2 decimal places to avoid floating point issues
+    const parsedLines = validLines.map(li => ({
+      item_id: parseInt(li.item_id),
+      quantity: parseInt(li.quantity) || 1,
+      sale_price: Math.round(parseFloat(li.price) * 100) / 100,
+    }))
 
     if (editSale) {
       // reverse old quantities (undo the decreases from the original sale)
@@ -94,28 +148,42 @@ export default function Sales() {
 
       // delete old line items then update the sale header
       await supabase.from('reading_sale_item').delete().eq('sale_id', editSale.sale_id)
-      await supabase.from('reading_sale').update({
+      const { error } = await supabase.from('reading_sale').update({
         contact_id: parseInt(form.contact_id),
         sale_date: form.sale_date,
       }).eq('sale_id', editSale.sale_id)
+
+      if (error) {
+        showToast('Failed to update sale', 'error')
+        return
+      }
 
       // insert new line items and decrease quantities
       for (const li of parsedLines) {
         await supabase.from('reading_sale_item').insert({ sale_id: editSale.sale_id, ...li })
         await updateQty(li.item_id, -li.quantity)
       }
+
+      showToast('Sale updated successfully', 'success')
     } else {
       // create the sale
-      const { data: newSale } = await supabase.from('reading_sale').insert({
+      const { data: newSale, error } = await supabase.from('reading_sale').insert({
         contact_id: parseInt(form.contact_id),
         sale_date: form.sale_date,
       }).select().single()
+
+      if (error) {
+        showToast('Failed to add sale', 'error')
+        return
+      }
 
       // insert line items and decrease quantities
       for (const li of parsedLines) {
         await supabase.from('reading_sale_item').insert({ sale_id: newSale.sale_id, ...li })
         await updateQty(li.item_id, -li.quantity)
       }
+
+      showToast('Sale added successfully', 'success')
     }
 
     setShowModal(false)
@@ -128,7 +196,13 @@ export default function Sales() {
     for (const li of oldLines) {
       await updateQty(li.item_id, li.quantity)
     }
-    await supabase.from('reading_sale').delete().eq('sale_id', deleteTarget.sale_id)
+    const { error } = await supabase.from('reading_sale').delete().eq('sale_id', deleteTarget.sale_id)
+    if (error) {
+      showToast('Failed to delete sale', 'error')
+      setDeleteTarget(null)
+      return
+    }
+    showToast('Sale deleted successfully', 'success')
     setDeleteTarget(null)
     fetchSales()
   }

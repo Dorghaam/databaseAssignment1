@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { useToast } from '../contexts/ToastContext'
 import SortableTable from '../components/SortableTable'
 import Modal from '../components/Modal'
 import ConfirmDialog from '../components/ConfirmDialog'
 
-const emptyLineItem = { item_id: '', quantity: 1, price: 0 }
+const emptyLineItem = { item_id: '', quantity: 1, price: '' }
 
 export default function Purchases() {
   const [purchases, setPurchases] = useState([])
@@ -16,9 +17,10 @@ export default function Purchases() {
   const [form, setForm] = useState({ contact_id: '', purchase_date: '', acquisition_type_id: '', estate_donation_note: '', lineItems: [{ ...emptyLineItem }] })
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [loading, setLoading] = useState(true)
+  const { showToast } = useToast()
 
   const fetchPurchases = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('reading_purchase')
       .select(`
         *,
@@ -27,6 +29,10 @@ export default function Purchases() {
         reading_purchase_item(*, reading_item(title))
       `)
       .order('purchase_date', { ascending: false })
+    if (error) {
+      showToast('Failed to load purchases', 'error')
+      return
+    }
     setPurchases(data || [])
     setLoading(false)
   }
@@ -91,9 +97,61 @@ export default function Purchases() {
   }
 
   const handleSave = async () => {
-    const parsedLines = form.lineItems
-      .filter(li => li.item_id)
-      .map(li => ({ item_id: parseInt(li.item_id), quantity: parseInt(li.quantity) || 1, purchase_price: parseFloat(li.price) || 0 }))
+    // validate required fields
+    if (!form.contact_id) {
+      showToast('Please select a contact', 'error')
+      return
+    }
+    if (!form.purchase_date) {
+      showToast('Purchase date is required', 'error')
+      return
+    }
+    if (!form.acquisition_type_id) {
+      showToast('Please select an acquisition type', 'error')
+      return
+    }
+
+    // validate line items
+    const validLines = form.lineItems.filter(li => li.item_id)
+    if (validLines.length === 0) {
+      showToast('Please add at least one item', 'error')
+      return
+    }
+
+    // validate prices and quantities for each line item
+    for (let i = 0; i < validLines.length; i++) {
+      const li = validLines[i]
+      const price = parseFloat(li.price)
+      const qty = parseInt(li.quantity)
+
+      // check if price is a valid number
+      if (li.price === '' || isNaN(price)) {
+        showToast(`Item ${i + 1}: price must be a valid number`, 'error')
+        return
+      }
+      // check for negative price
+      if (price < 0) {
+        showToast(`Item ${i + 1}: price cannot be negative`, 'error')
+        return
+      }
+      // check for infinite or unreasonable values
+      if (!isFinite(price)) {
+        showToast(`Item ${i + 1}: price is not a valid number`, 'error')
+        return
+      }
+      // check quantity
+      if (isNaN(qty) || qty < 1) {
+        showToast(`Item ${i + 1}: quantity must be at least 1`, 'error')
+        return
+      }
+    }
+
+    // round prices to 2 decimal places to avoid floating point issues
+    const parsedLines = validLines.map(li => ({
+      item_id: parseInt(li.item_id),
+      quantity: parseInt(li.quantity) || 1,
+      purchase_price: Math.round(parseFloat(li.price) * 100) / 100,
+    }))
 
     if (editPurchase) {
       // reverse old quantities (undo the increases from the original purchase)
@@ -104,32 +162,46 @@ export default function Purchases() {
 
       // delete old line items then update the purchase header
       await supabase.from('reading_purchase_item').delete().eq('purchase_id', editPurchase.purchase_id)
-      await supabase.from('reading_purchase').update({
+      const { error } = await supabase.from('reading_purchase').update({
         contact_id: parseInt(form.contact_id),
         purchase_date: form.purchase_date,
         acquisition_type_id: parseInt(form.acquisition_type_id),
         estate_donation_note: form.estate_donation_note || null,
       }).eq('purchase_id', editPurchase.purchase_id)
 
+      if (error) {
+        showToast('Failed to update purchase', 'error')
+        return
+      }
+
       // insert new line items and increase quantities
       for (const li of parsedLines) {
         await supabase.from('reading_purchase_item').insert({ purchase_id: editPurchase.purchase_id, ...li })
         await updateQty(li.item_id, li.quantity)
       }
+
+      showToast('Purchase updated successfully', 'success')
     } else {
       // create the purchase
-      const { data: newPurchase } = await supabase.from('reading_purchase').insert({
+      const { data: newPurchase, error } = await supabase.from('reading_purchase').insert({
         contact_id: parseInt(form.contact_id),
         purchase_date: form.purchase_date,
         acquisition_type_id: parseInt(form.acquisition_type_id),
         estate_donation_note: form.estate_donation_note || null,
       }).select().single()
 
+      if (error) {
+        showToast('Failed to add purchase', 'error')
+        return
+      }
+
       // insert line items and increase quantities
       for (const li of parsedLines) {
         await supabase.from('reading_purchase_item').insert({ purchase_id: newPurchase.purchase_id, ...li })
         await updateQty(li.item_id, li.quantity)
       }
+
+      showToast('Purchase added successfully', 'success')
     }
 
     setShowModal(false)
@@ -142,7 +214,13 @@ export default function Purchases() {
     for (const li of oldLines) {
       await updateQty(li.item_id, -li.quantity)
     }
-    await supabase.from('reading_purchase').delete().eq('purchase_id', deleteTarget.purchase_id)
+    const { error } = await supabase.from('reading_purchase').delete().eq('purchase_id', deleteTarget.purchase_id)
+    if (error) {
+      showToast('Failed to delete purchase', 'error')
+      setDeleteTarget(null)
+      return
+    }
+    showToast('Purchase deleted successfully', 'success')
     setDeleteTarget(null)
     fetchPurchases()
   }

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { useToast } from '../contexts/ToastContext'
 import SortableTable from '../components/SortableTable'
 import SearchBar from '../components/SearchBar'
 import Modal from '../components/Modal'
@@ -19,13 +20,18 @@ export default function Inventory() {
   const [form, setForm] = useState(emptyForm)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [loading, setLoading] = useState(true)
+  const { showToast } = useToast()
 
   // pulls items with their category and condition names from supabase
   const fetchItems = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('reading_item')
       .select('*, reading_category(category_name), reading_condition(condition_name)')
       .order('item_id')
+    if (error) {
+      showToast('Failed to load inventory', 'error')
+      return
+    }
     setItems(data || [])
     setLoading(false)
   }
@@ -80,27 +86,57 @@ export default function Inventory() {
   }
 
   const handleSave = async () => {
+    // validate required fields
+    if (!form.title.trim()) {
+      showToast('Title is required', 'error')
+      return
+    }
+
+    // validate quantity is a whole number and not negative
+    const qty = parseInt(form.quantity_on_hand)
+    if (isNaN(qty) || qty < 0) {
+      showToast('Quantity must be 0 or greater', 'error')
+      return
+    }
+
     const payload = {
-      title: form.title,
+      title: form.title.trim(),
       category_id: parseInt(form.category_id) || null,
       description: form.description,
       era: form.era,
       region: form.region,
       format: form.format,
       condition_id: parseInt(form.condition_id) || null,
-      quantity_on_hand: parseInt(form.quantity_on_hand) || 0,
+      quantity_on_hand: qty,
     }
+
     if (editItem) {
-      await supabase.from('reading_item').update(payload).eq('item_id', editItem.item_id)
+      const { error } = await supabase.from('reading_item').update(payload).eq('item_id', editItem.item_id)
+      if (error) {
+        showToast('Failed to update item', 'error')
+        return
+      }
+      showToast('Item updated successfully', 'success')
     } else {
-      await supabase.from('reading_item').insert(payload)
+      const { error } = await supabase.from('reading_item').insert(payload)
+      if (error) {
+        showToast('Failed to add item', 'error')
+        return
+      }
+      showToast('Item added successfully', 'success')
     }
     setShowModal(false)
     fetchItems()
   }
 
   const handleDelete = async () => {
-    await supabase.from('reading_item').delete().eq('item_id', deleteTarget.item_id)
+    const { error } = await supabase.from('reading_item').delete().eq('item_id', deleteTarget.item_id)
+    if (error) {
+      showToast('Failed to delete item. It may be referenced by other records.', 'error')
+      setDeleteTarget(null)
+      return
+    }
+    showToast('Item deleted successfully', 'success')
     setDeleteTarget(null)
     fetchItems()
   }

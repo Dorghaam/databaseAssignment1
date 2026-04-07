@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { useToast } from '../contexts/ToastContext'
 import SortableTable from '../components/SortableTable'
 import SearchBar from '../components/SearchBar'
 import Modal from '../components/Modal'
@@ -25,10 +26,11 @@ export default function Contacts() {
   const [form, setForm] = useState({ ...emptyForm })
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [loading, setLoading] = useState(true)
+  const { showToast } = useToast()
 
   // fetches contacts with all their related data (roles, dealer info, specialties)
   const fetchContacts = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('reading_contact')
       .select(`
         *,
@@ -37,6 +39,10 @@ export default function Contacts() {
         reading_dealer_specialty(specialty_id, reading_specialty(*, reading_category(category_name)))
       `)
       .order('contact_id')
+    if (error) {
+      showToast('Failed to load contacts', 'error')
+      return
+    }
     setContacts(data || [])
     setLoading(false)
   }
@@ -104,18 +110,33 @@ export default function Contacts() {
   }
 
   const handleSave = async () => {
+    // validate required fields
+    if (!form.first_name.trim()) {
+      showToast('First name is required', 'error')
+      return
+    }
+    if (!form.last_name.trim()) {
+      showToast('Last name is required', 'error')
+      return
+    }
+
     // figure out which role_id means dealer so we can check if this contact is a dealer
     const dealerRole = roles.find(r => r.role_name === 'Dealer')
     const isDealer = dealerRole && form.roles.includes(dealerRole.role_id)
 
     if (editContact) {
       // update the contact fields
-      await supabase.from('reading_contact').update({
-        first_name: form.first_name, last_name: form.last_name,
+      const { error } = await supabase.from('reading_contact').update({
+        first_name: form.first_name.trim(), last_name: form.last_name.trim(),
         phone: form.phone, email: form.email,
         street_address: form.street_address, city: form.city,
         province: form.province, postal_code: form.postal_code,
       }).eq('contact_id', editContact.contact_id)
+
+      if (error) {
+        showToast('Failed to update contact', 'error')
+        return
+      }
 
       // wipe old roles and reinsert the new ones
       await supabase.from('reading_contact_role').delete().eq('contact_id', editContact.contact_id)
@@ -147,14 +168,21 @@ export default function Contacts() {
           })
         }
       }
+
+      showToast('Contact updated successfully', 'success')
     } else {
       // create the contact first
-      const { data: newContact } = await supabase.from('reading_contact').insert({
-        first_name: form.first_name, last_name: form.last_name,
+      const { data: newContact, error } = await supabase.from('reading_contact').insert({
+        first_name: form.first_name.trim(), last_name: form.last_name.trim(),
         phone: form.phone, email: form.email,
         street_address: form.street_address, city: form.city,
         province: form.province, postal_code: form.postal_code,
       }).select().single()
+
+      if (error) {
+        showToast('Failed to add contact', 'error')
+        return
+      }
 
       // insert roles
       if (form.roles.length > 0) {
@@ -181,6 +209,8 @@ export default function Contacts() {
           })
         }
       }
+
+      showToast('Contact added successfully', 'success')
     }
 
     setShowModal(false)
@@ -188,7 +218,13 @@ export default function Contacts() {
   }
 
   const handleDelete = async () => {
-    await supabase.from('reading_contact').delete().eq('contact_id', deleteTarget.contact_id)
+    const { error } = await supabase.from('reading_contact').delete().eq('contact_id', deleteTarget.contact_id)
+    if (error) {
+      showToast('Failed to delete contact. They may be referenced by purchases or sales.', 'error')
+      setDeleteTarget(null)
+      return
+    }
+    showToast('Contact deleted successfully', 'success')
     setDeleteTarget(null)
     fetchContacts()
   }

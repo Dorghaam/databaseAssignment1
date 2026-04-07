@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { useToast } from '../contexts/ToastContext'
 import SortableTable from '../components/SortableTable'
 import Modal from '../components/Modal'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -14,12 +15,17 @@ export default function MarketPrices() {
   const [form, setForm] = useState({ item_id: '', condition_id: '', price: '', date_checked: '', source: 'Website' })
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [loading, setLoading] = useState(true)
+  const { showToast } = useToast()
 
   const fetchPrices = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('reading_market_price')
       .select('*, reading_item(title), reading_condition(condition_name)')
       .order('date_checked', { ascending: false })
+    if (error) {
+      showToast('Failed to load market prices', 'error')
+      return
+    }
     setPrices(data || [])
     setLoading(false)
   }
@@ -59,24 +65,75 @@ export default function MarketPrices() {
   }
 
   const handleSave = async () => {
+    // validate required fields
+    if (!form.item_id) {
+      showToast('Please select an item', 'error')
+      return
+    }
+    if (!form.condition_id) {
+      showToast('Please select a condition', 'error')
+      return
+    }
+    if (!form.date_checked) {
+      showToast('Date checked is required', 'error')
+      return
+    }
+
+    // validate the price value for all float edge cases
+    const price = parseFloat(form.price)
+    if (form.price === '' || isNaN(price)) {
+      showToast('Price must be a valid number', 'error')
+      return
+    }
+    if (price < 0) {
+      showToast('Price cannot be negative', 'error')
+      return
+    }
+    if (!isFinite(price)) {
+      showToast('Price is not a valid number', 'error')
+      return
+    }
+    if (price === 0) {
+      showToast('Price must be greater than zero', 'error')
+      return
+    }
+
+    // round to 2 decimal places to avoid floating point issues
     const payload = {
       item_id: parseInt(form.item_id),
       condition_id: parseInt(form.condition_id),
-      price: parseFloat(form.price) || 0,
+      price: Math.round(price * 100) / 100,
       date_checked: form.date_checked,
       source: form.source,
     }
+
     if (editPrice) {
-      await supabase.from('reading_market_price').update(payload).eq('market_price_id', editPrice.market_price_id)
+      const { error } = await supabase.from('reading_market_price').update(payload).eq('market_price_id', editPrice.market_price_id)
+      if (error) {
+        showToast('Failed to update price entry', 'error')
+        return
+      }
+      showToast('Price entry updated successfully', 'success')
     } else {
-      await supabase.from('reading_market_price').insert(payload)
+      const { error } = await supabase.from('reading_market_price').insert(payload)
+      if (error) {
+        showToast('Failed to add price entry', 'error')
+        return
+      }
+      showToast('Price entry added successfully', 'success')
     }
     setShowModal(false)
     fetchPrices()
   }
 
   const handleDelete = async () => {
-    await supabase.from('reading_market_price').delete().eq('market_price_id', deleteTarget.market_price_id)
+    const { error } = await supabase.from('reading_market_price').delete().eq('market_price_id', deleteTarget.market_price_id)
+    if (error) {
+      showToast('Failed to delete price entry', 'error')
+      setDeleteTarget(null)
+      return
+    }
+    showToast('Price entry deleted successfully', 'success')
     setDeleteTarget(null)
     fetchPrices()
   }

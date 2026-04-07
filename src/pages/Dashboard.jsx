@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { useToast } from '../contexts/ToastContext'
 import SearchBar from '../components/SearchBar'
 import SortableTable from '../components/SortableTable'
 
@@ -10,6 +11,7 @@ export default function Dashboard() {
   const [dateTo, setDateTo] = useState('')
   const [selectedContactId, setSelectedContactId] = useState('')
   const [loading, setLoading] = useState(true)
+  const { showToast } = useToast()
 
   // all the data we need for the dashboard and reports
   const [items, setItems] = useState([])
@@ -28,6 +30,13 @@ export default function Dashboard() {
       supabase.from('reading_market_price').select('*, reading_item(title), reading_condition(condition_name)').order('date_checked', { ascending: false }),
       supabase.from('reading_special_request').select('*, reading_contact(first_name, last_name)').order('date_requested', { ascending: false }),
     ])
+
+    // show an error toast if any of the fetches failed
+    const errors = [itemRes, contactRes, purchaseRes, saleRes, priceRes, requestRes].filter(r => r.error)
+    if (errors.length > 0) {
+      showToast('Failed to load some dashboard data', 'error')
+    }
+
     setItems(itemRes.data || [])
     setContacts(contactRes.data || [])
     setPurchases(purchaseRes.data || [])
